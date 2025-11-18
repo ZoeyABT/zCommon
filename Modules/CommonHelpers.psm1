@@ -35,9 +35,9 @@
     Hashtable with secret names as keys and plaintext values as values
     
 .EXAMPLE
-    $secrets = Get-KeyVaultSecrets -VaultName "abt-csp-keyvault" `
+    $secrets = Get-KeyVaultSecrets -VaultName "contoso-vault" `
         -SecretNames @("app-refresh-token", "app-client-secret") `
-        -TenantId "3376fd25-ade9-423f-99d5-058e6d4214c3"
+        -TenantId "11111111-4444-5555-6666-22222222"
     
     $refreshToken = $secrets["app-refresh-token"]
     $clientSecret = $secrets["app-client-secret"]
