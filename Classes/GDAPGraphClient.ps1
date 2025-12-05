@@ -38,6 +38,8 @@ class GDAPGraphClient {
     [System.Collections.ArrayList]$requesthistory
     [int]$maxretrycount = 1
     [int]$retrydelay = 5
+    [int]$maxThrottleRetries = 10
+    [bool]$ThrowOnRetryExhaustion = $true  # Set to $false to return error response instead of throwing
     
     # Constructor
     GDAPGraphClient() {
@@ -275,9 +277,9 @@ class GDAPGraphClient {
             }
             $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/generatetoken" `
                 -ContentType "application/x-www-form-urlencoded" -Body $body -Headers $authHeader -ErrorAction Stop -UseBasicParsing
-            $this.accessToken = ($cspauthresult.Content | ConvertFrom-Json).access_token
+            $this.accesstoken = ($cspauthresult.Content | ConvertFrom-Json).access_token
             
-            $iat = [datetime]$cspauthResult.headers.date.split(",")[-1]
+            $iat = [datetime]$cspauthresult.headers.date.split(",")[-1]
             $this.expires = $iat.AddSeconds(3600)
             $ProgressPreference = 'Continue'
         }
@@ -324,9 +326,9 @@ class GDAPGraphClient {
                 }
                 $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/generatetoken" `
                     -ContentType "application/x-www-form-urlencoded" -Body $body -Headers $authHeader -ErrorAction Stop -UseBasicParsing
-                $this.accessToken = ($cspauthresult.Content | ConvertFrom-Json).access_token
+                $this.accesstoken = ($cspauthresult.Content | ConvertFrom-Json).access_token
                 
-                $iat = [datetime]$cspauthResult.headers.date.split(",")[-1]
+                $iat = [datetime]$cspauthresult.headers.date.split(",")[-1]
                 $this.expires = $iat.AddSeconds(3600)
                 $ProgressPreference = 'Continue'
             }
@@ -379,9 +381,11 @@ class GDAPGraphClient {
     .DESCRIPTION
         Primary method for all API calls. Handles:
         - Automatic token validation/refresh
-        - Request retry logic
+        - Request retry logic (configurable via maxretrycount)
+        - Throttling (429) with exponential backoff and Retry-After header support
         - Response tracking in requesthistory
         - JSON serialization of request bodies
+        - Comprehensive error handling with detailed error information
         
     .PARAMETER Uri
         Full API endpoint URL
@@ -398,12 +402,32 @@ class GDAPGraphClient {
     .OUTPUTS
         GraphAPIResponse object with statusCode, Content, Headers, etc.
         
+        Error Handling:
+        - By default, throws GraphAPIException when retries are exhausted (ThrowOnRetryExhaustion = $true)
+        - Set ThrowOnRetryExhaustion = $false to return error response objects instead
+        - Always check response.StatusCode >= 400 for errors
+        - StatusCode = 0 indicates status code could not be extracted
+        - Error details available in response.Content (typically JSON with 'error' property)
+        
     .EXAMPLE
         $response = $client.GraphAPICall("https://graph.microsoft.com/v1.0/users", "GET")
+        if ($response.StatusCode -ge 400) {
+            Write-Error "Request failed: $($response.StatusDescription)"
+        }
         
     .EXAMPLE
         $body = @{ displayName = "Test User"; userPrincipalName = "test@domain.com" }
         $response = $client.GraphAPICall("https://graph.microsoft.com/v1.0/users", "POST", $null, $body)
+        
+    .EXAMPLE
+        # Handle exceptions
+        try {
+            $response = $client.GraphAPICall($uri, "GET")
+        } catch [GraphAPIException] {
+            Write-Error "API Error: $($_.Exception.Message)"
+            Write-Error "Status Code: $($_.Exception.Response.StatusCode)"
+            Write-Error "Error Details: $($_.Exception.Response.Content | ConvertTo-Json)"
+        }
     #>
     [object]GraphAPICall($Uri, $Method, $additionalHeaders, $body) {
         # Validate token and set headers
@@ -411,8 +435,8 @@ class GDAPGraphClient {
         $Headers = @{Authorization = "Bearer $($this.accesstoken)"}
         
         if($null -ne $additionalHeaders) {
-            $AdditionalHeaders.Keys | ForEach-Object {
-                $Headers[$_] = $AdditionalHeaders[$_]
+            $additionalHeaders.Keys | ForEach-Object {
+                $Headers[$_] = $additionalHeaders[$_]
             }
         }
         
@@ -426,9 +450,12 @@ class GDAPGraphClient {
         $ProgressPreference = 'SilentlyContinue'
 
         $retryCount = 0
+        $throttleRetryCount = 0
+        $baseDelay = $this.retrydelay
+        
         while($retryCount -lt $this.maxretrycount) {
             Try {
-                if([string]::IsNullOrEmpty($body)) {
+                if($null -eq $body -or ([string]::IsNullOrWhiteSpace($body))) {
                     $rawresponse = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -ContentType 'Application/Json' -UseBasicParsing -ErrorAction Stop
                 }
                 Else {
@@ -449,22 +476,201 @@ class GDAPGraphClient {
                 break
             }
             Catch {
-                # Generic error handling (429 handling commented out for PS 5.x compatibility)
-                $response.statusCode = $null
-                $response.StatusDescription = $_.Exception.ToString()
-                $response.Content = $null
-                $response.Headers = $null
-            }
+                $statusCode = $null
+                $retryAfter = $null
+                $responseHeaders = $null
+                $errorContent = $null
+                
+                # Extract status code from exception (version-agnostic approach)
+                if ($_.Exception.Response) {
+                    # PowerShell 5.1 and 7.x compatible
+                    try {
+                        # Try PowerShell 7+ approach first (direct enum)
+                        if ($_.Exception.Response.StatusCode -is [System.Net.HttpStatusCode]) {
+                            $statusCode = [int]$_.Exception.Response.StatusCode
+                        }
+                        # PowerShell 5.1 approach (value__ property)
+                        elseif ($_.Exception.Response.StatusCode.PSObject.Properties['value__']) {
+                            $statusCode = [int]$_.Exception.Response.StatusCode.value__
+                        }
+                    } catch {
+                        # Fallback: try to extract from exception message
+                        if ($_.Exception.Message -match '\((\d{3})\)') {
+                            $statusCode = [int]$matches[1]
+                        } elseif ($_.Exception.Message -match '\b(\d{3})\b') {
+                            # Try to find any 3-digit number that might be a status code
+                            $potentialCodes = [regex]::Matches($_.Exception.Message, '\b(\d{3})\b')
+                            foreach ($match in $potentialCodes) {
+                                $code = [int]$match.Value
+                                if ($code -ge 100 -and $code -lt 600) {
+                                    $statusCode = $code
+                                    break
+                                }
+                            }
+                        }
+                    }
+                } elseif ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                    try {
+                        if ($_.Exception.Response.StatusCode -is [System.Net.HttpStatusCode]) {
+                            $statusCode = [int]$_.Exception.Response.StatusCode
+                        }
+                    } catch {
+                        # Status code extraction failed
+                    }
+                }
+                
+                # If still no status code, check ErrorDetails (PowerShell 7+)
+                if ($null -eq $statusCode -and $_.ErrorDetails) {
+                    if ($_.ErrorDetails.Message -match '\((\d{3})\)') {
+                        $statusCode = [int]$matches[1]
+                    }
+                }
+                
+                # Extract Retry-After header (version-agnostic approach)
+                if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+                    try {
+                        $retryAfterHeader = $_.Exception.Response.Headers['Retry-After']
+                        if ($retryAfterHeader) {
+                            # Retry-After can be seconds (int) or HTTP date (string)
+                            if ($retryAfterHeader -is [int]) {
+                                $retryAfter = $retryAfterHeader
+                            } elseif ($retryAfterHeader -is [string]) {
+                                # Try parsing as HTTP date first
+                                $parsedDate = $null
+                                if ([DateTime]::TryParse($retryAfterHeader, [ref]$parsedDate)) {
+                                    $retryAfter = [Math]::Max(1, [int](($parsedDate - (Get-Date)).TotalSeconds))
+                                } else {
+                                    # Try parsing as integer string
+                                    $parsedInt = 0
+                                    if ([int]::TryParse($retryAfterHeader, [ref]$parsedInt)) {
+                                        $retryAfter = $parsedInt
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        # Header extraction failed, will use exponential backoff
+                    }
+                    
+                    # Try to capture response headers for debugging
+                    try {
+                        $responseHeaders = $_.Exception.Response.Headers
+                    } catch {
+                        # Headers not accessible
+                    }
+                }
+                
+                # Extract error content (PowerShell version-agnostic)
+                try {
+                    # PowerShell 7+ uses ErrorDetails property
+                    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                        $errorContent = $_.ErrorDetails.Message
+                    }
+                    # PowerShell 5.1 uses Response stream
+                    elseif ($_.Exception.Response -and $_.Exception.Response.GetResponseStream) {
+                        try {
+                            $errorStream = $_.Exception.Response.GetResponseStream()
+                            if ($errorStream -and $errorStream.CanRead) {
+                                $reader = New-Object System.IO.StreamReader($errorStream)
+                                $errorContent = $reader.ReadToEnd()
+                                $reader.Close()
+                                $errorStream.Close()
+                            }
+                        } catch {
+                            # Stream reading failed, try alternative approach
+                            if ($_.Exception.Message) {
+                                $errorContent = $_.Exception.Message
+                            }
+                        }
+                    }
+                    # Fallback to exception message
+                    elseif ($_.Exception.Message) {
+                        $errorContent = $_.Exception.Message
+                    }
+                } catch {
+                    # Error content extraction failed
+                    $errorContent = $_.Exception.Message
+                }
+                
+                # Parse error content if available
+                if ($null -ne $errorContent) {
+                    try {
+                        $response.Content = $errorContent | ConvertFrom-Json -ErrorAction Stop
+                    } catch {
+                        # Not JSON, store as string
+                        $response.Content = $errorContent
+                    }
+                } else {
+                    $response.Content = $null
+                }
+                
+                # Store error information in response object
+                # Use 0 for status code if extraction failed (allows callers to check for null/0)
+                $response.statusCode = if ($null -ne $statusCode) { $statusCode } else { 0 }
+                
+                # Create a more useful status description
+                $statusDesc = if ($null -ne $statusCode) {
+                    "$($_.Exception.GetType().Name): HTTP $statusCode"
+                } else {
+                    "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+                }
+                $response.StatusDescription = $statusDesc
+                $response.Headers = $responseHeaders
+                
+                # Handle 429 throttling specifically
+                if ($statusCode -eq 429) {
+                    $throttleRetryCount++
+                    
+                    # Check if we've exceeded throttle-specific retry limit
+                    if ($throttleRetryCount -gt $this.maxThrottleRetries) {
+                        $this.requesthistory.Add($response) | Out-Null
+                        $ProgressPreference = 'Continue'
+                        
+                        if ($this.ThrowOnRetryExhaustion) {
+                            $errorMessage = "GDAPGraphClient.GraphAPICall: Request $($requestid) failed after $throttleRetryCount throttle retries. Last Status: 429. Last Error: $($response.StatusDescription)"
+                            $exception = [GraphAPIException]::new($errorMessage, $response)
+                            throw $exception
+                        } else {
+                            # Return error response instead of throwing
+                            return $response
+                        }
+                    }
+                    
+                    # Determine wait time: use Retry-After if available, otherwise exponential backoff with jitter
+                    if ($retryAfter -gt 0) {
+                        $waitTime = $retryAfter
+                        Write-Warning "Rate limited (429). Retry-After header indicates wait time: $waitTime seconds (throttle retry $throttleRetryCount/$($this.maxThrottleRetries))..."
+                    } else {
+                        # Exponential backoff: 2^retryCount * baseDelay + random jitter (0-50% of baseDelay)
+                        $exponentialDelay = [Math]::Pow(2, $throttleRetryCount - 1) * $baseDelay
+                        $jitter = Get-Random -Minimum 0 -Maximum ([Math]::Max(1, [int]($baseDelay * 0.5)))
+                        $waitTime = [Math]::Min([int]($exponentialDelay + $jitter), 300) # Cap at 5 minutes
+                        Write-Warning "Rate limited (429). No Retry-After header. Using exponential backoff: waiting $waitTime seconds (throttle retry $throttleRetryCount/$($this.maxThrottleRetries))..."
+                    }
+                    
+                    Start-Sleep -Seconds $waitTime
+                    continue  # Retry the request without incrementing general retryCount
+                }
+                
+                # Handle other HTTP errors (non-429)
+                # Retry logic for other errors
+                $retryCount++
+                if ($retryCount -ge $this.maxretrycount) {
+                    $this.requesthistory.Add($response) | Out-Null
+                    $ProgressPreference = 'Continue'
+                    
+                    if ($this.ThrowOnRetryExhaustion) {
+                        $errorMessage = "GDAPGraphClient.GraphAPICall: Request $($requestid) failed after $retryCount attempts. Last Status: $($response.statusCode). Last Error: $($response.StatusDescription)"
+                        $exception = [GraphAPIException]::new($errorMessage, $response)
+                        throw $exception
+                    } else {
+                        # Return error response instead of throwing
+                        return $response
+                    }
+                }
 
-            # Retry logic
-            $retryCount++
-            if ($retryCount -ge $this.maxretrycount) {
-                $this.requesthistory.Add($response) | Out-Null
-                $ProgressPreference = 'Continue'
-                throw "GDAPGraphClient.GraphAPICall: Request $($requestid) failed after $retryCount attempts. Last Status: $($response.statusCode). Last Error: $($response.StatusDescription)"
+                Start-Sleep -Seconds $this.retrydelay
             }
-
-            Start-Sleep -Seconds $this.retrydelay
         }
         
         $ProgressPreference = 'Continue'
@@ -490,10 +696,16 @@ class GDAPGraphClient {
     Standardized response structure containing:
     - Uri: The endpoint that was called
     - RequestId: Unique GUID for tracking
-    - StatusCode: HTTP status code (200, 404, etc.)
+    - StatusCode: HTTP status code (200, 404, etc.). Value of 0 indicates status code could not be extracted.
     - StatusDescription: Human-readable status or error message
-    - Content: Parsed JSON response or raw content
+    - Content: Parsed JSON response or raw content (may contain error details for failed requests)
     - Headers: HTTP response headers
+    
+.NOTES
+    For error handling:
+    - Check StatusCode >= 400 for client/server errors
+    - Check StatusCode = 0 for unknown/network errors
+    - Content may contain error details from the API (typically JSON with 'error' property)
 #>
 class GraphAPIResponse {
     [string]$Uri
@@ -502,5 +714,25 @@ class GraphAPIResponse {
     [string]$StatusDescription
     [object]$Content
     [object]$Headers
+}
+
+<#
+.SYNOPSIS
+    Custom exception class for Graph API errors
+    
+.DESCRIPTION
+    Extends System.Exception to include the GraphAPIResponse object,
+    allowing callers to access detailed error information even when exceptions are thrown.
+#>
+class GraphAPIException : System.Exception {
+    [GraphAPIResponse]$Response
+    
+    GraphAPIException([string]$message, [GraphAPIResponse]$response) : base($message) {
+        $this.Response = $response
+    }
+    
+    GraphAPIException([string]$message, [GraphAPIResponse]$response, [System.Exception]$innerException) : base($message, $innerException) {
+        $this.Response = $response
+    }
 }
 
