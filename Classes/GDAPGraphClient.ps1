@@ -366,10 +366,10 @@ class GDAPGraphClient {
         $tokenArray = [System.Text.Encoding]::ASCII.GetString($tokenByteArray)
         $tokobj = $tokenArray | ConvertFrom-Json
         
-        if($tokobj.roles) {
+        if($tokobj.PSObject.Properties.Name -contains 'roles') {
             $this.claims = $tokobj.roles
         }
-        elseif($tokobj.scp) {
+        elseif($tokobj.PSObject.Properties.Name -contains 'scp') {
             $this.claims = $tokobj.scp
         }
     }
