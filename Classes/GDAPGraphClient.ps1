@@ -459,8 +459,19 @@ class GDAPGraphClient {
                     $rawresponse = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -ContentType 'Application/Json' -UseBasicParsing -ErrorAction Stop
                 }
                 Else {
-                    # Ensure body is JSON string
-                    $requestBody = if ($body -is [string]) { $body } else { $body | ConvertTo-Json -Depth 5 }
+                    # Determine request body - handle string, string array (Get-Content without -Raw), or object
+                    $requestBody = $null
+                    if ($body -is [string]) {
+                        $requestBody = $body
+                    }
+                    elseif ($body -is [array] -and $body.Count -gt 0 -and ($body | ForEach-Object { $_ -is [string] }) -notcontains $false) {
+                        # String array (e.g., from Get-Content without -Raw) - join into single string
+                        $requestBody = $body -join "`n"
+                    }
+                    else {
+                        # Object/hashtable - convert to JSON
+                        $requestBody = $body | ConvertTo-Json -Depth 10
+                    }
                     $rawresponse = Invoke-WebRequest -Method $Method -Uri $Uri -Headers $Headers -Body $requestBody -ContentType 'Application/Json' -UseBasicParsing -ErrorAction Stop
                 }
 
