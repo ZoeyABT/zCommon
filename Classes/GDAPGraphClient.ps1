@@ -275,7 +275,7 @@ class GDAPGraphClient {
             $body = @{
                 grant_type = 'jwt_token'
             }
-            $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/generatetoken" `
+            $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/v3/generatetoken" `
                 -ContentType "application/x-www-form-urlencoded" -Body $body -Headers $authHeader -ErrorAction Stop -UseBasicParsing
             $this.accesstoken = ($cspauthresult.Content | ConvertFrom-Json).access_token
             
@@ -324,7 +324,7 @@ class GDAPGraphClient {
                 $body = @{
                     grant_type = 'jwt_token'
                 }
-                $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/generatetoken" `
+                $cspauthresult = Invoke-WebRequest -Method "Post" -Uri "https://api.partnercenter.microsoft.com/v3/generatetoken" `
                     -ContentType "application/x-www-form-urlencoded" -Body $body -Headers $authHeader -ErrorAction Stop -UseBasicParsing
                 $this.accesstoken = ($cspauthresult.Content | ConvertFrom-Json).access_token
                 
