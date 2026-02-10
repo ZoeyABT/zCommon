@@ -20,7 +20,8 @@
     
 .DESCRIPTION
     Standard pattern for retrieving secrets from KeyVault.
-    Handles authentication and disconnection automatically.
+    Reuses an existing Azure session if already connected to the correct tenant,
+    otherwise authenticates automatically. Never disconnects, allowing session reuse.
     
 .PARAMETER VaultName
     Name of the Azure KeyVault
@@ -44,7 +45,9 @@
     
 .NOTES
     - Requires Az.Accounts and Az.KeyVault modules
-    - Always disconnects from Azure after retrieval to clean up session
+    - Reuses existing Azure connection if already authenticated to the correct tenant
+    - Only calls Connect-AzAccount when no valid session exists or tenant doesn't match
+    - Never disconnects from Azure, allowing session reuse across multiple calls
     - Cannot be used inside PowerShell classes (cmdlet injection limitation)
 #>
 function Get-KeyVaultSecrets {
@@ -61,12 +64,21 @@ function Get-KeyVaultSecrets {
     )
     
     try {
-        # Connect to Azure for KeyVault access
-        Write-Verbose "Connecting to Azure (TenantId: $TenantId)..."
-        Connect-AzAccount -AuthScope AzureKeyVaultServiceEndpointResourceId -TenantId $TenantId -ErrorAction Stop | Out-Null
-        
+        # Check if already connected to Azure with the correct tenant
+        $needsConnect = $true
+        $azContext = Get-AzContext -ErrorAction SilentlyContinue
+        if ($null -ne $azContext -and $azContext.Tenant.Id -eq $TenantId) {
+            Write-Verbose "Already connected to Azure (TenantId: $TenantId), reusing existing session"
+            $needsConnect = $false
+        }
+
+        if ($needsConnect) {
+            Write-Verbose "Connecting to Azure (TenantId: $TenantId)..."
+            Connect-AzAccount -AuthScope AzureKeyVaultServiceEndpointResourceId -TenantId $TenantId -ErrorAction Stop | Out-Null
+        }
+
         $secrets = @{}
-        
+
         foreach ($secretName in $SecretNames) {
             Write-Verbose "Retrieving secret: $secretName from vault: $VaultName"
             try {
@@ -79,18 +91,13 @@ function Get-KeyVaultSecrets {
                 throw
             }
         }
-        
+
         Write-Verbose "Successfully retrieved $($secrets.Count) secrets from KeyVault"
         return $secrets
     }
     catch {
         Write-Error "KeyVault operation failed: $($_.Exception.Message)"
         throw
-    }
-    finally {
-        # Always disconnect to clean up session
-        Write-Verbose "Disconnecting from Azure..."
-        Disconnect-AzAccount -ErrorAction SilentlyContinue | Out-Null
     }
 }
 
