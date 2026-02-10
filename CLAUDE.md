@@ -25,7 +25,7 @@ PowerSZhell is a PowerShell library for making authenticated API calls to Micros
 - `GraphAPIException` - Custom exception including the GraphAPIResponse for detailed error handling
 
 **CommonHelpers Module** (`Modules/CommonHelpers.psm1`)
-- `Get-KeyVaultSecrets` - Azure KeyVault credential retrieval (requires Az.Accounts, Az.KeyVault)
+- `Get-KeyVaultSecrets` - Azure KeyVault credential retrieval (requires Az.Accounts, Az.KeyVault). Reuses an existing Azure session if already connected to the correct tenant; only calls `Connect-AzAccount` when needed and never disconnects
 - `Get-GraphRequestWithPaging` - Microsoft Graph API pagination (`@odata.nextLink`)
 - `Get-AzureRequestWithPaging` - Azure ARM pagination (`nextLink`)
 - `Get-PartnerCenterRequestWithPaging` - Partner Center pagination (`links.next.uri` + MS-ContinuationToken header)
@@ -45,3 +45,4 @@ New-Module -ScriptBlock ([ScriptBlock]::Create((Invoke-WebRequest "https://raw.g
 - Token auto-refresh occurs when <5 minutes remain before expiration
 - `ThrowOnRetryExhaustion` property controls error behavior: `$true` throws exceptions, `$false` returns error response objects
 - Each API type has different pagination patterns—use the appropriate helper function for the API being called
+- `Get-KeyVaultSecrets` checks for an existing `Az` session via `Get-AzContext` before authenticating—callers can `Connect-AzAccount` once per session and all subsequent KeyVault calls will reuse that connection
