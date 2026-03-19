@@ -1,18 +1,76 @@
 <#
 .SYNOPSIS
     Common helper functions for GDAPGraphClient-based projects
-    
+
 .DESCRIPTION
     Reusable utility functions including:
-    - Azure KeyVault credential retrieval
+    - MSAL operator authentication for MWS API token proxy
+    - Azure KeyVault credential retrieval (legacy)
     - Graph API pagination handling
     - Common patterns for multi-tenant operations
-    
+
 .NOTES
     Author: ABT Engineering
-    Version: 1.0
-    Dependencies: Az.Accounts, Az.KeyVault
+    Version: 2.0
+    Dependencies: MSAL.PS (required), Az.Accounts + Az.KeyVault (optional, for Get-KeyVaultSecrets)
 #>
+
+<#
+.SYNOPSIS
+    Acquire an MSAL operator token for the MWS API token proxy
+
+.DESCRIPTION
+    Authenticates the operator against the MWS API app registration using MSAL.PS.
+    Attempts silent token acquisition first (from MSAL cache), falls back to
+    interactive browser login on first use or when the cached token has expired.
+
+    The returned token object is used as the bearer token for all GDAPGraphClient
+    token proxy calls.
+
+.PARAMETER ForceInteractive
+    Skip silent acquisition and force an interactive browser login
+
+.OUTPUTS
+    MSAL token object with AccessToken, ExpiresOn, and other properties
+
+.EXAMPLE
+    $msalToken = Get-MWSOperatorToken
+    $client = [GDAPGraphClient]::new($msalToken)
+
+.EXAMPLE
+    # Force re-authentication
+    $msalToken = Get-MWSOperatorToken -ForceInteractive
+
+.NOTES
+    - Requires MSAL.PS module: Install-Module MSAL.PS -Scope CurrentUser
+    - Cannot be used inside PowerShell classes (cmdlet injection limitation)
+    - Token is cached by MSAL.PS; subsequent calls use silent refresh
+#>
+function Get-MWSOperatorToken {
+    [CmdletBinding()]
+    param(
+        [switch]$ForceInteractive
+    )
+
+    $clientId = '79d5aeee-e34d-434c-9c4c-a25f18f844b9'
+    $tenantId = '3376fd25-ade9-423f-99d5-058e6d4214c3'
+    $scopes   = "$clientId/.default"
+
+    if (-not $ForceInteractive) {
+        try {
+            $token = Get-MsalToken -ClientId $clientId -TenantId $tenantId -Scopes $scopes -Silent
+            Write-Verbose "Acquired MWS operator token silently (expires: $($token.ExpiresOn))"
+            return $token
+        }
+        catch {
+            Write-Verbose "Silent token acquisition failed, falling back to interactive login"
+        }
+    }
+
+    $token = Get-MsalToken -ClientId $clientId -TenantId $tenantId -Scopes $scopes -Interactive
+    Write-Verbose "Acquired MWS operator token interactively (expires: $($token.ExpiresOn))"
+    return $token
+}
 
 <#
 .SYNOPSIS
@@ -421,6 +479,7 @@ function Get-PartnerCenterRequestWithPaging {
 
 # Export functions
 Export-ModuleMember -Function @(
+    'Get-MWSOperatorToken',
     'Get-KeyVaultSecrets',
     'Get-GraphRequestWithPaging',
     'Get-AzureRequestWithPaging',
