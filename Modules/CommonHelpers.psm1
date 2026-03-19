@@ -12,8 +12,41 @@
 .NOTES
     Author: ABT Engineering
     Version: 2.0
-    Dependencies: MSAL.PS (required), Az.Accounts + Az.KeyVault (optional, for Get-KeyVaultSecrets)
+    Dependencies: MSAL.PS (auto-installed if missing), Az.Accounts + Az.KeyVault (optional, for Get-KeyVaultSecrets)
 #>
+
+<#
+.SYNOPSIS
+    Ensure the MSAL.PS module is installed and imported
+
+.DESCRIPTION
+    Checks if MSAL.PS is available. If not, installs it to CurrentUser scope
+    automatically, then imports it. Called by New-GDAPClient and Get-MWSOperatorToken
+    so callers don't need to manage the dependency themselves.
+
+.NOTES
+    - Installs from PSGallery with -Force to avoid prompts
+    - Scope is always CurrentUser (no admin required)
+#>
+function Initialize-MsalModule {
+    [CmdletBinding()]
+    param()
+
+    if (-not (Get-Module -Name MSAL.PS -ListAvailable)) {
+        Write-Host "MSAL.PS module not found. Installing..." -ForegroundColor Yellow
+        try {
+            Install-Module MSAL.PS -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            Write-Host "MSAL.PS installed successfully" -ForegroundColor Green
+        }
+        catch {
+            throw "Failed to install MSAL.PS module. Install manually with: Install-Module MSAL.PS -Scope CurrentUser`nError: $_"
+        }
+    }
+
+    if (-not (Get-Module -Name MSAL.PS)) {
+        Import-Module MSAL.PS -ErrorAction Stop
+    }
+}
 
 <#
 .SYNOPSIS
@@ -51,6 +84,8 @@ function Get-MWSOperatorToken {
     param(
         [switch]$ForceInteractive
     )
+
+    Initialize-MsalModule
 
     $clientId = '79d5aeee-e34d-434c-9c4c-a25f18f844b9'
     $tenantId = '3376fd25-ade9-423f-99d5-058e6d4214c3'
