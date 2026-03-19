@@ -79,7 +79,7 @@ class GDAPGraphClient {
             Security = 'https://api.security.microsoft.com'
             Exchange = 'https://outlook.office365.com/.default'
             Azure = 'https://management.azure.com//user_impersonation'
-            PartnerCenter = 'https://api.partnercenter.microsoft.com'
+            PartnerCenter = 'https://api.partnercenter.microsoft.com/.default'
         }
     }
 
