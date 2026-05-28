@@ -4,67 +4,35 @@
 
 .DESCRIPTION
     Reusable utility functions including:
-    - MSAL operator authentication for MWS API token proxy
-    - Azure KeyVault credential retrieval (legacy)
+    - MWS API operator authentication via the MwsTokenBroker WAM module
     - Graph API pagination handling
     - Common patterns for multi-tenant operations
 
 .NOTES
     Author: ABT Engineering
-    Version: 2.0
-    Dependencies: MSAL.PS (auto-installed if missing), Az.Accounts + Az.KeyVault (optional, for Get-KeyVaultSecrets)
+    Version: 3.0
+    Dependencies: MwsTokenBroker (private binary module; install to a PSModulePath location)
 #>
 
 <#
 .SYNOPSIS
-    Ensure the MSAL.PS module is installed and imported
+    Acquire an MWS API operator token via the MwsTokenBroker WAM module
 
 .DESCRIPTION
-    Checks if MSAL.PS is available. If not, installs it to CurrentUser scope
-    automatically, then imports it. Called by New-GDAPClient and Get-MWSOperatorToken
-    so callers don't need to manage the dependency themselves.
+    Authenticates the operator against the MWS API app registration using the
+    MwsTokenBroker module (Get-MwsBrokerToken), which acquires tokens through the
+    Windows WAM broker with MSAL isolated in a private AssemblyLoadContext. The
+    broker attempts silent acquisition first (from its persisted cache) and falls
+    back to an interactive WAM prompt on first use or when the cached token expires.
 
-.NOTES
-    - Installs from PSGallery with -Force to avoid prompts
-    - Scope is always CurrentUser (no admin required)
-#>
-function Initialize-MsalModule {
-    [CmdletBinding()]
-    param()
-
-    if (-not (Get-Module -Name MSAL.PS -ListAvailable)) {
-        Write-Host "MSAL.PS module not found. Installing..." -ForegroundColor Yellow
-        try {
-            Install-Module MSAL.PS -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-            Write-Host "MSAL.PS installed successfully" -ForegroundColor Green
-        }
-        catch {
-            throw "Failed to install MSAL.PS module. Install manually with: Install-Module MSAL.PS -Scope CurrentUser`nError: $_"
-        }
-    }
-
-    if (-not (Get-Module -Name MSAL.PS)) {
-        Import-Module MSAL.PS -ErrorAction Stop
-    }
-}
-
-<#
-.SYNOPSIS
-    Acquire an MSAL operator token for the MWS API token proxy
-
-.DESCRIPTION
-    Authenticates the operator against the MWS API app registration using MSAL.PS.
-    Attempts silent token acquisition first (from MSAL cache), falls back to
-    interactive browser login on first use or when the cached token has expired.
-
-    The returned token object is used as the bearer token for all GDAPGraphClient
-    token proxy calls.
+    The returned token object exposes AccessToken and ExpiresOn and is used as the
+    bearer token for all GDAPGraphClient token proxy calls.
 
 .PARAMETER ForceInteractive
-    Skip silent acquisition and force an interactive browser login
+    Skip silent acquisition and force an interactive WAM login
 
 .OUTPUTS
-    MSAL token object with AccessToken, ExpiresOn, and other properties
+    Token object with AccessToken (string) and ExpiresOn (DateTimeOffset)
 
 .EXAMPLE
     $msalToken = Get-MWSOperatorToken
@@ -75,9 +43,10 @@ function Initialize-MsalModule {
     $msalToken = Get-MWSOperatorToken -ForceInteractive
 
 .NOTES
-    - Requires MSAL.PS module: Install-Module MSAL.PS -Scope CurrentUser
+    - Requires the MwsTokenBroker module (private binary module, NOT on PSGallery).
+      Install it to a PSModulePath location before use.
     - Cannot be used inside PowerShell classes (cmdlet injection limitation)
-    - Token is cached by MSAL.PS; subsequent calls use silent refresh
+    - Tokens are cached by the broker; subsequent calls use silent refresh
 #>
 function Get-MWSOperatorToken {
     [CmdletBinding()]
@@ -85,146 +54,52 @@ function Get-MWSOperatorToken {
         [switch]$ForceInteractive
     )
 
-    Initialize-MsalModule
-
-    $clientId = '79d5aeee-e34d-434c-9c4c-a25f18f844b9'
-    $tenantId = '3376fd25-ade9-423f-99d5-058e6d4214c3'
-    $scopes   = "$clientId/.default"
-
-    if (-not $ForceInteractive) {
-        try {
-            $token = Get-MsalToken -ClientId $clientId -TenantId $tenantId -Scopes $scopes -Silent
-            Write-Verbose "Acquired MWS operator token silently (expires: $($token.ExpiresOn))"
-            return $token
-        }
-        catch {
-            Write-Verbose "Silent token acquisition failed, falling back to interactive login"
-        }
+    if (-not (Get-Module -ListAvailable -Name MwsTokenBroker)) {
+        throw @"
+The 'MwsTokenBroker' module is required but was not found.
+It is a private binary module (not on PSGallery) and must be installed to a PSModulePath location.
+Build it from the zMSALModule repo and copy the 'module' output into one of your PSModulePath folders.
+"@
     }
 
-    $token = Get-MsalToken -ClientId $clientId -TenantId $tenantId -Scopes $scopes -Interactive
-    Write-Verbose "Acquired MWS operator token interactively (expires: $($token.ExpiresOn))"
+    Import-Module MwsTokenBroker -ErrorAction Stop
+
+    $token = Get-MwsBrokerToken -ForceInteractive:$ForceInteractive
+    Write-Verbose "Acquired MWS operator token (expires: $($token.ExpiresOn))"
     return $token
 }
 
 <#
 .SYNOPSIS
-    Retrieve secrets from Azure KeyVault with standardized error handling
-    
-.DESCRIPTION
-    Standard pattern for retrieving secrets from KeyVault.
-    Reuses an existing Azure session if already connected to the correct tenant,
-    otherwise authenticates automatically. Never disconnects, allowing session reuse.
-    
-.PARAMETER VaultName
-    Name of the Azure KeyVault
-    
-.PARAMETER SecretNames
-    Array of secret names to retrieve
-    
-.PARAMETER TenantId
-    Azure AD tenant ID where KeyVault resides
-    
-.OUTPUTS
-    Hashtable with secret names as keys and plaintext values as values
-    
-.EXAMPLE
-    $secrets = Get-KeyVaultSecrets -VaultName "contoso-vault" `
-        -SecretNames @("app-refresh-token", "app-client-secret") `
-        -TenantId "11111111-4444-5555-6666-22222222"
-    
-    $refreshToken = $secrets["app-refresh-token"]
-    $clientSecret = $secrets["app-client-secret"]
-    
-.NOTES
-    - Requires Az.Accounts and Az.KeyVault modules
-    - Reuses existing Azure connection if already authenticated to the correct tenant
-    - Only calls Connect-AzAccount when no valid session exists or tenant doesn't match
-    - Never disconnects from Azure, allowing session reuse across multiple calls
-    - Cannot be used inside PowerShell classes (cmdlet injection limitation)
-#>
-function Get-KeyVaultSecrets {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$VaultName,
-        
-        [Parameter(Mandatory = $true)]
-        [string[]]$SecretNames,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$TenantId
-    )
-    
-    try {
-        # Check if already connected to Azure with the correct tenant
-        $needsConnect = $true
-        $azContext = Get-AzContext -ErrorAction SilentlyContinue
-        if ($null -ne $azContext -and $azContext.Tenant.Id -eq $TenantId) {
-            Write-Verbose "Already connected to Azure (TenantId: $TenantId), reusing existing session"
-            $needsConnect = $false
-        }
-
-        if ($needsConnect) {
-            Write-Verbose "Connecting to Azure (TenantId: $TenantId)..."
-            Connect-AzAccount -AuthScope AzureKeyVaultServiceEndpointResourceId -TenantId $TenantId -ErrorAction Stop | Out-Null
-        }
-
-        $secrets = @{}
-
-        foreach ($secretName in $SecretNames) {
-            Write-Verbose "Retrieving secret: $secretName from vault: $VaultName"
-            try {
-                $secretValue = Get-AzKeyVaultSecret -Name $secretName -VaultName $VaultName -AsPlainText -ErrorAction Stop
-                $secrets[$secretName] = $secretValue
-                Write-Verbose "Successfully retrieved secret: $secretName"
-            }
-            catch {
-                Write-Error "Failed to retrieve secret '$secretName' from vault '$VaultName': $($_.Exception.Message)"
-                throw
-            }
-        }
-
-        Write-Verbose "Successfully retrieved $($secrets.Count) secrets from KeyVault"
-        return $secrets
-    }
-    catch {
-        Write-Error "KeyVault operation failed: $($_.Exception.Message)"
-        throw
-    }
-}
-
-<#
-.SYNOPSIS
     Handle Graph API pagination automatically (Graph API v1.0/beta)
-    
+
 .DESCRIPTION
     Automatically follows @odata.nextLink to retrieve all pages of results.
     Works specifically with Microsoft Graph API pagination structure.
-    
+
 .PARAMETER GraphClient
     Instance of GDAPGraphClient configured for Graph API
-    
+
 .PARAMETER Uri
     Initial Graph API endpoint URL
-    
+
 .PARAMETER Method
     HTTP method (typically "GET")
-    
+
 .PARAMETER Body
     Optional request body for POST/PATCH operations
-    
+
 .OUTPUTS
     Array of all items from all pages combined
-    
+
 .EXAMPLE
     $usersUri = "https://graph.microsoft.com/v1.0/users"
     $allUsers = Get-GraphRequestWithPaging -GraphClient $graphClient -Uri $usersUri
-    
+
 .EXAMPLE
     $devicesUri = "https://graph.microsoft.com/beta/devices"
     $allDevices = Get-GraphRequestWithPaging -GraphClient $graphClient -Uri $devicesUri -Method "GET"
-    
+
 .NOTES
     - Only works with Microsoft Graph API (not Azure ARM or Partner Center)
     - Looks for 'value' array and '@odata.nextLink' in response
@@ -236,25 +111,25 @@ function Get-GraphRequestWithPaging {
     param (
         [Parameter(Mandatory = $true)]
         [object]$GraphClient,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$Uri,
-        
+
         [Parameter(Mandatory = $false)]
         [string]$Method = "Get",
-        
+
         [Parameter(Mandatory = $false)]
         [object]$Body = $null
     )
-    
+
     $allResults = [System.Collections.ArrayList]::new()
     $currentUri = $Uri
     $pageCount = 0
-    
+
     do {
         $pageCount++
         Write-Verbose "Fetching page $pageCount from: $currentUri"
-        
+
         $response = $GraphClient.GraphAPICall($currentUri, $Method, $Body)
 
         # Check for errors
@@ -284,7 +159,7 @@ function Get-GraphRequestWithPaging {
             }
 
             # Check for next page link
-            if ($response.Content.PSObject.Properties.Name -contains '@odata.nextLink' -and 
+            if ($response.Content.PSObject.Properties.Name -contains '@odata.nextLink' -and
                 -not [string]::IsNullOrEmpty($response.Content.'@odata.nextLink')) {
                 $currentUri = $response.Content.'@odata.nextLink'
                 Write-Verbose "Next page link found, continuing..."
@@ -296,9 +171,9 @@ function Get-GraphRequestWithPaging {
             Write-Verbose "Empty response content, stopping pagination"
             $currentUri = $null
         }
-        
+
     } while ($currentUri)
-    
+
     Write-Verbose "Pagination complete. Total items retrieved: $($allResults.Count) across $pageCount pages"
     return @($allResults)
 }
@@ -306,31 +181,31 @@ function Get-GraphRequestWithPaging {
 <#
 .SYNOPSIS
     Handle Azure Resource Manager API pagination
-    
+
 .DESCRIPTION
     Azure ARM API uses 'nextLink' (not @odata.nextLink) for pagination.
     Automatically follows nextLink to retrieve all pages.
-    
+
 .PARAMETER GraphClient
     Instance of GDAPGraphClient configured for Azure ARM (with delegated token)
-    
+
 .PARAMETER Uri
     Initial Azure ARM endpoint URL
-    
+
 .PARAMETER Method
     HTTP method (typically "GET")
-    
+
 .OUTPUTS
     Array of all items from all pages combined
-    
+
 .EXAMPLE
     $subscriptionsUri = "https://management.azure.com/subscriptions?api-version=2022-12-01"
     $allSubs = Get-AzureRequestWithPaging -GraphClient $azClient -Uri $subscriptionsUri
-    
+
 .EXAMPLE
     $vmsUri = "https://management.azure.com/subscriptions/$subId/providers/Microsoft.Compute/virtualMachines?api-version=2023-07-01"
     $allVMs = Get-AzureRequestWithPaging -GraphClient $azClient -Uri $vmsUri
-    
+
 .NOTES
     - Only works with Azure Resource Manager API
     - Looks for 'value' array and 'nextLink' in response
@@ -341,22 +216,22 @@ function Get-AzureRequestWithPaging {
     param (
         [Parameter(Mandatory = $true)]
         [object]$GraphClient,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$Uri,
-        
+
         [Parameter(Mandatory = $false)]
         [string]$Method = "Get"
     )
-    
+
     $allResults = [System.Collections.ArrayList]::new()
     $currentUri = $Uri
     $pageCount = 0
-    
+
     do {
         $pageCount++
         Write-Verbose "Fetching Azure ARM page $pageCount from: $currentUri"
-        
+
         $response = $GraphClient.GraphAPICall($currentUri, $Method)
 
         if ($null -eq $response -or $response.StatusCode -ge 300) {
@@ -383,7 +258,7 @@ function Get-AzureRequestWithPaging {
             }
 
             # Azure ARM uses 'nextLink' (not @odata.nextLink)
-            if ($response.Content.PSObject.Properties.Name -contains 'nextLink' -and 
+            if ($response.Content.PSObject.Properties.Name -contains 'nextLink' -and
                 -not [string]::IsNullOrEmpty($response.Content.nextLink)) {
                 $currentUri = $response.Content.nextLink
                 Write-Verbose "Azure ARM next page link found, continuing..."
@@ -395,9 +270,9 @@ function Get-AzureRequestWithPaging {
             Write-Verbose "Empty Azure ARM response content, stopping pagination"
             $currentUri = $null
         }
-        
+
     } while ($currentUri)
-    
+
     Write-Verbose "Azure ARM pagination complete. Total items: $($allResults.Count) across $pageCount pages"
     return @($allResults)
 }
@@ -405,31 +280,31 @@ function Get-AzureRequestWithPaging {
 <#
 .SYNOPSIS
     Handle Partner Center API pagination
-    
+
 .DESCRIPTION
     Partner Center API uses 'links.next.uri' and requires MS-ContinuationToken header.
     Automatically follows pagination to retrieve all pages.
-    
+
 .PARAMETER GraphClient
     Instance of GDAPGraphClient configured for Partner Center (GetCSPToken)
-    
+
 .PARAMETER Uri
     Initial Partner Center endpoint URL
-    
+
 .PARAMETER Method
     HTTP method (typically "GET")
-    
+
 .OUTPUTS
     Array of all items from all pages combined
-    
+
 .EXAMPLE
     $customersUri = "https://api.partnercenter.microsoft.com/v1/customers"
     $allCustomers = Get-PartnerCenterRequestWithPaging -GraphClient $cspClient -Uri $customersUri
-    
+
 .EXAMPLE
     $subscriptionsUri = "https://api.partnercenter.microsoft.com/v1/customers/$customerId/subscriptions"
     $allSubs = Get-PartnerCenterRequestWithPaging -GraphClient $cspClient -Uri $subscriptionsUri
-    
+
 .NOTES
     - Only works with Partner Center API
     - Looks for 'items' array, 'links.next.uri', and 'continuationtoken'
@@ -440,23 +315,23 @@ function Get-PartnerCenterRequestWithPaging {
     param (
         [Parameter(Mandatory = $true)]
         [object]$GraphClient,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$Uri,
-        
+
         [Parameter(Mandatory = $false)]
         [string]$Method = "Get"
     )
-    
+
     $allResults = [System.Collections.ArrayList]::new()
     $currentUri = $Uri
     $pageCount = 0
     $continueHeader = $null
-    
+
     do {
         $pageCount++
         Write-Verbose "Fetching Partner Center page $pageCount from: $currentUri"
-        
+
         $response = $GraphClient.GraphAPICall($currentUri, $Method, $continueHeader)
 
         if ($null -eq $response -or $response.StatusCode -ge 300) {
@@ -487,15 +362,15 @@ function Get-PartnerCenterRequestWithPaging {
             if ($response.Content.PSObject.Properties.Name -contains 'links' -and
                 $response.Content.links.PSObject.Properties.Name -contains 'next' -and
                 -not [string]::IsNullOrEmpty($response.Content.links.next.uri)) {
-                
+
                 # Build next URI (relative path from Partner Center)
                 $currentUri = "https://api.partnercenter.microsoft.com/v1" + $response.Content.links.next.uri
-                
+
                 # Set continuation token header for next request
                 if ($response.Content.PSObject.Properties.Name -contains 'continuationtoken') {
                     $continueHeader = @{ 'MS-ContinuationToken' = "$($response.Content.continuationtoken)" }
                 }
-                
+
                 Write-Verbose "Partner Center next page link found, continuing..."
             } else {
                 Write-Verbose "No more Partner Center pages, pagination complete"
@@ -505,9 +380,9 @@ function Get-PartnerCenterRequestWithPaging {
             Write-Verbose "Empty Partner Center response content, stopping pagination"
             $currentUri = $null
         }
-        
+
     } while ($currentUri)
-    
+
     Write-Verbose "Partner Center pagination complete. Total items: $($allResults.Count) across $pageCount pages"
     return @($allResults)
 }
@@ -517,13 +392,13 @@ function Get-PartnerCenterRequestWithPaging {
     Create an authenticated GDAPGraphClient instance
 
 .DESCRIPTION
-    Factory function that handles MSAL operator authentication and returns
+    Factory function that handles MwsTokenBroker operator authentication and returns
     a ready-to-use GDAPGraphClient. All scripts should use this single entry
     point for client creation — if the auth flow changes in the future, only
     this function needs to be updated.
 
 .PARAMETER ForceInteractive
-    Skip silent MSAL acquisition and force an interactive browser login
+    Skip silent broker acquisition and force an interactive WAM login
 
 .OUTPUTS
     GDAPGraphClient instance with MsalToken set, ready for Get*Token calls
@@ -554,9 +429,7 @@ function New-GDAPClient {
 Export-ModuleMember -Function @(
     'New-GDAPClient',
     'Get-MWSOperatorToken',
-    'Get-KeyVaultSecrets',
     'Get-GraphRequestWithPaging',
     'Get-AzureRequestWithPaging',
     'Get-PartnerCenterRequestWithPaging'
 )
-
