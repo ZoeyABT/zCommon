@@ -7,16 +7,16 @@
     Graph API, Azure Resource Manager, and other Microsoft APIs. Uses the MWS API token
     proxy for secure token acquisition — credentials never leave Azure.
 
-    Requires MSAL.PS module for operator authentication.
+    Requires the MwsTokenBroker module for operator authentication.
 
 .NOTES
     Author: ABT Engineering
     Version: 2.0
-    Dependencies: MSAL.PS module
+    Dependencies: MwsTokenBroker module
 
 .EXAMPLE
     # Authenticate operator and create client
-    Import-Module MSAL.PS
+    Import-Module MwsTokenBroker
     $msalToken = Get-MWSOperatorToken
     $client = [GDAPGraphClient]::new($msalToken)
 
