@@ -10,10 +10,10 @@ PowerSZhell is a PowerShell library for making authenticated API calls to Micros
 
 ### Token Proxy Model
 
-All token acquisition routes through the MWS API token proxy (`https://api.mortgageworkspace.com/API/EntraID/Token`). The proxy handles KeyVault secret retrieval and Microsoft login via managed identity — credentials never leave Azure. The operator authenticates via MSAL.PS (interactive browser login, cached for silent refresh), and the proxy uses that bearer token to issue scoped access tokens.
+All token acquisition routes through the MWS API token proxy (`https://api.mortgageworkspace.com/API/EntraID/Token`). The proxy handles KeyVault secret retrieval and Microsoft login via managed identity — credentials never leave Azure. The operator authenticates via the MwsTokenBroker WAM module (interactive Windows broker prompt on first use, cached for silent refresh; MSAL is isolated in a private AssemblyLoadContext so it coexists with ExchangeOnlineManagement/MicrosoftTeams), and the proxy uses that bearer token to issue scoped access tokens.
 
 ```
-Script → MSAL.PS (interactive/silent login) → MWS API proxy (get token) → Graph/Partner API
+Script → MwsTokenBroker (WAM interactive/silent login) → MWS API proxy (get token) → Graph/Partner API
 ```
 
 ### Core Components
@@ -35,8 +35,7 @@ Script → MSAL.PS (interactive/silent login) → MWS API proxy (get token) → 
 - `GraphAPIException` - Custom exception including the GraphAPIResponse for detailed error handling
 
 **CommonHelpers Module** (`Modules/CommonHelpers.psm1`)
-- `Get-MWSOperatorToken` - MSAL.PS operator authentication (silent with interactive fallback). Returns the token object for `GDAPGraphClient` constructor
-- `Get-KeyVaultSecrets` - Azure KeyVault credential retrieval (legacy, still available for non-auth use cases)
+- `Get-MWSOperatorToken` - MwsTokenBroker WAM operator authentication (silent with interactive fallback). Returns the token object for `GDAPGraphClient` constructor
 - `Get-GraphRequestWithPaging` - Microsoft Graph API pagination (`@odata.nextLink`)
 - `Get-AzureRequestWithPaging` - Azure ARM pagination (`nextLink`)
 - `Get-PartnerCenterRequestWithPaging` - Partner Center pagination (`links.next.uri` + MS-ContinuationToken header)
@@ -45,7 +44,7 @@ Script → MSAL.PS (interactive/silent login) → MWS API proxy (get token) → 
 
 `The2MagicLines.ps1` demonstrates loading and initializing the library from GitHub:
 ```powershell
-Import-Module MSAL.PS
+Import-Module MwsTokenBroker
 . ([ScriptBlock]::Create((Invoke-WebRequest "https://raw.githubusercontent.com/ZoeyABT/zCommon/refs/heads/master/Classes/GDAPGraphClient.ps1" -UseBasicParsing).Content))
 New-Module -ScriptBlock ([ScriptBlock]::Create((Invoke-WebRequest "https://raw.githubusercontent.com/ZoeyABT/zCommon/refs/heads/master/Modules/CommonHelpers.psm1" -UseBasicParsing).Content)) -Name CommonHelpers | Import-Module
 $MsalToken = Get-MWSOperatorToken
@@ -59,6 +58,6 @@ $client = [GDAPGraphClient]::new($MsalToken)
 - Token auto-refresh occurs when <5 minutes remain before expiration, via the token proxy
 - `ThrowOnRetryExhaustion` property controls error behavior: `$true` throws exceptions, `$false` returns error response objects
 - Each API type has different pagination patterns—use the appropriate helper function for the API being called
-- MSAL.PS handles token caching; `Get-MWSOperatorToken` tries silent refresh before falling back to interactive login
+- MwsTokenBroker handles token caching; `Get-MWSOperatorToken` tries silent refresh before falling back to an interactive WAM prompt
 - The `InvokeTokenProxy()` hidden method is the single point of contact for all token acquisition
 - Old method signatures (with appid, refreshtoken, clientsecret) still work but emit deprecation warnings
