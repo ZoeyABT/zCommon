@@ -38,33 +38,47 @@ Create `tests/Migration.Tests.ps1` with exactly this content:
 ```powershell
 #Requires -Version 7.4
 # Automatable verification for the MSAL.PS -> MwsTokenBroker migration.
-# Does NOT acquire a real token (never calls the broker); only checks the
-# exported command surface and the missing-module guard.
+# Does NOT acquire a real token (never calls the broker). Checks the module
+# source (deprecated functions / MSAL.PS references removed) and the exported
+# command surface, plus the missing-module guard.
 
 $ErrorActionPreference = 'Stop'
 $modulePath = Join-Path $PSScriptRoot '..\Modules\CommonHelpers.psm1'
+$moduleSource = Get-Content -Raw -Path $modulePath
 
 function Assert-True($condition, $message) {
     if (-not $condition) { throw "FAIL: $message" }
     Write-Host "PASS: $message" -ForegroundColor Green
 }
 
-# Load the module in this session
+# 1. Deprecated functions are removed from the module source
+#    (source check, not Get-Command: Initialize-MsalModule was never exported,
+#    so an exported-surface check would pass trivially whether or not it exists.)
+Assert-True ($moduleSource -notmatch 'function\s+Initialize-MsalModule') `
+    'Initialize-MsalModule function is removed from source'
+Assert-True ($moduleSource -notmatch 'function\s+Get-KeyVaultSecrets') `
+    'Get-KeyVaultSecrets function is removed from source'
+
+# 2. No lingering MSAL.PS references in the module source
+Assert-True ($moduleSource -notmatch 'MSAL\.PS') `
+    'No MSAL.PS references remain in source'
+Assert-True ($moduleSource -notmatch 'Get-MsalToken') `
+    'No Get-MsalToken references remain in source'
+
+# Load the module to inspect the exported surface
 Import-Module $modulePath -Force
 
-# 1. Deprecated helpers are gone
-Assert-True ($null -eq (Get-Command Initialize-MsalModule -ErrorAction SilentlyContinue)) `
-    'Initialize-MsalModule is removed'
-Assert-True ($null -eq (Get-Command Get-KeyVaultSecrets -ErrorAction SilentlyContinue)) `
-    'Get-KeyVaultSecrets is removed'
-
-# 2. Public surface is intact
+# 3. Public surface is intact
 Assert-True ($null -ne (Get-Command Get-MWSOperatorToken -ErrorAction SilentlyContinue)) `
     'Get-MWSOperatorToken is exported'
 Assert-True ($null -ne (Get-Command New-GDAPClient -ErrorAction SilentlyContinue)) `
     'New-GDAPClient is exported'
 
-# 3. Missing-module guard throws (isolated child: PSModulePath has only $PSHOME\Modules,
+# 4. Deprecated helper is no longer exported
+Assert-True ($null -eq (Get-Command Get-KeyVaultSecrets -ErrorAction SilentlyContinue)) `
+    'Get-KeyVaultSecrets is not exported'
+
+# 5. Missing-module guard throws (isolated child: PSModulePath has only $PSHOME\Modules,
 #    so MwsTokenBroker cannot be found even if installed on this machine).
 $childScript = @'
 $ErrorActionPreference = "Stop"
@@ -90,7 +104,7 @@ Write-Host "`nAll migration checks passed." -ForegroundColor Cyan
 - [ ] **Step 2: Run the test to verify it FAILS**
 
 Run: `pwsh -NoProfile -File tests/Migration.Tests.ps1`
-Expected: FAIL on the first assertion — `FAIL: Initialize-MsalModule is removed` (the function still exists in the current module).
+Expected: FAIL on the first assertion — `FAIL: Initialize-MsalModule function is removed from source` (the function still exists in the current module).
 
 - [ ] **Step 3: Commit the test**
 
