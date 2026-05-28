@@ -392,13 +392,13 @@ function Get-PartnerCenterRequestWithPaging {
     Create an authenticated GDAPGraphClient instance
 
 .DESCRIPTION
-    Factory function that handles MSAL operator authentication and returns
+    Factory function that handles MwsTokenBroker operator authentication and returns
     a ready-to-use GDAPGraphClient. All scripts should use this single entry
     point for client creation — if the auth flow changes in the future, only
     this function needs to be updated.
 
 .PARAMETER ForceInteractive
-    Skip silent MSAL acquisition and force an interactive browser login
+    Skip silent broker acquisition and force an interactive WAM login
 
 .OUTPUTS
     GDAPGraphClient instance with MsalToken set, ready for Get*Token calls
