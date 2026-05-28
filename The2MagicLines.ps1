@@ -1,5 +1,6 @@
-# Prerequisites: Install-Module MSAL.PS -Scope CurrentUser
-Import-Module MSAL.PS
+# Prerequisites: MwsTokenBroker module installed to a PSModulePath location
+# (private binary module, not on PSGallery — build it from the zMSALModule repo)
+Import-Module MwsTokenBroker
 
 # Create GDAPGraphClient Class
 . ([ScriptBlock]::Create((Invoke-WebRequest "https://raw.githubusercontent.com/ZoeyABT/zCommon/refs/heads/master/Classes/GDAPGraphClient.ps1" -UseBasicParsing).Content))
